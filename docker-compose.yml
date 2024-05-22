@@ -1,0 +1,222 @@
+    #######################################
+    #       Basic needed services         #
+    #######################################
+
+services:
+
+# Redis service
+# This service runs the Redis database
+    redis:
+        image: redis:7.2.5-alpine
+        container_name: redis
+        restart: unless-stopped
+        env_file: env/.env.${ENV}
+        command: redis-server --loglevel warning --requirepass DwaLbTL84QaA
+        volumes:
+            - redis-data:/data
+            - conf/redis.conf:/usr/local/etc/redis/redis.conf
+        networks:
+            - nestify-network
+        healthcheck:
+            test: ["CMD", "redis-cli", "ping"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+
+# Pgweb service
+# This service runs the Pgweb administration tool for PostgreSQL
+    pgweb:
+        image: sosedoff/pgweb
+        container_name: pgweb
+        env_file: env/.env.${ENV}
+        restart: unless-stopped
+        depends_on:
+            - database
+        networks:
+            - nestify-network
+        healthcheck:
+            test: nc -vz 127.0.0.1 8081
+            interval: 10s
+            timeout: 5s
+            retries: 5
+
+# Database service
+# This service runs the PostgreSQL database
+    database:
+        container_name: database
+        image: postgres:16.3-alpine
+        restart: unless-stopped
+        env_file: env/.env.${ENV}
+        environment:
+            - POSTGRES_USER=${DB_USERNAME}
+            - POSTGRES_PASSWORD=${DB_PASSWORD}
+            - POSTGRES_DB=${DB_DATABASE}
+        depends_on:
+            - traefik
+        networks:
+            - nestify-network
+        volumes:
+            - ./postgres-data:/var/lib/postgresql/data/
+        healthcheck:
+          test: ["CMD-SHELL", "pg_isready"]
+          interval: 10s
+          timeout: 5s
+          retries: 5
+
+# Traefik service
+# This service runs the Traefik reverse proxy which is used to expose the other services
+    traefik:
+        image: traefik:v3.0.0
+        container_name: traefik
+        restart: unless-stopped
+        command:
+            # Enable Docker in Traefik, so that it reads labels from Docker services
+            - --providers.docker=true
+            # Do not expose all Docker services, only the ones explicitly exposed
+            - --providers.docker.exposedbydefault=false
+            # Disable Docker Swarm mode for local development
+            # - --providers.docker.swarmmode
+            # Enable the access log, with HTTP requests
+            - --accesslog
+            # Enable the Traefik log, for configurations and errors
+            - --log
+            - --log.level=DEBUG
+            - --log.format=json
+            - --log.filePath=/logs/traefik.log
+            - --accesslog=true
+            - --accesslog.filePath=/logs/access.log
+            - --accesslog.bufferingsize=50
+            # Enable the Dashboard and API
+            - --api
+            - --serverstransport.maxidleconnsperhost=100000
+            # Enable the Dashboard and API in insecure mode for local development
+            - --api.insecure=true
+            # Define HTTP entrypoint on port 80
+            - --entrypoints.web.address=:80
+            # Define HTTPS entrypoint on port 443
+            - --entrypoints.websecure.address=:443
+            # Enable Let's Encrypt certificate resolver
+            - --certificatesresolvers.certresolver.acme.tlschallenge=true
+            # Email address used for Let's Encrypt registration
+            - --certificatesresolvers.certresolver.acme.email=test@email.com
+            # Path to store Let's Encrypt certificates
+            - --certificatesresolvers.certresolver.acme.storage=/letsencrypt/acme.json
+            # Redirect HTTP requests to HTTPS
+            - --providers.middlewares.httpsredirect.redirectscheme.scheme=https
+            # Enable Let's Encrypt staging environment for local development , remove this line for production
+            - --certificatesresolvers.certresolver.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory
+
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.middlewares.traefik-compress.compress=true"
+            - "traefik.http.middlewares.traefik-ratelimit.ratelimit.average=100" # Set average rate limit to 100 requests per minute
+            - "traefik.http.middlewares.traefik-ratelimit.ratelimit.burst=50" # Set burst rate limit to 50 requests
+            - "traefik.http.middlewares.traefik-ratelimit.ratelimit.period=1m" # Set rate limit evaluation period to 1 minute
+            - "traefik.http.middlewares.traefik-retry.retry.attempts=4" # Allow up to 4 retry attempts
+            - "traefik.http.middlewares.traefik-retry.retry.initialinterval=100ms" # Set initial retry interval to 100 milliseconds
+            # - "traefik.http.middlewares.security-headers.headers.accesscontrolallowmethods=GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS" # Allow specified HTTP methods
+            # - "traefik.http.middlewares.security-headers.headers.accesscontrolalloworiginlist=*" # Allow specified HTTP origin list
+            # - "traefik.http.middlewares.security-headers.headers.accessControlAllowCredentials=true" # Add control allow credentials header
+            # - "traefik.http.middlewares.security-headers.headers.accesscontrolallowheaders=*" # Add control allow credentials header
+            # - "traefik.http.middlewares.security-headers.headers.accesscontrolmaxage=3600" # Set value for Access-Control-Max-Age header
+            # - "traefik.http.middlewares.security-headers.headers.addvaryheader=true" # Add Vary header to responses
+            - "traefik.http.middlewares.security-headers.headers.framedeny=true" # Enable frame denial for clickjacking protection
+            - "traefik.http.middlewares.security-headers.headers.contenttypenosniff=true" # Enable Content-Type nosniff
+            - "traefik.http.middlewares.security-headers.headers.browserxssfilter=false" # Enable browser XSS filter
+            - "traefik.http.middlewares.security-headers.headers.referrerpolicy=no-referrer" # Set Referrer-Policy header
+            - "traefik.http.middlewares.security-headers.headers.permissionsPolicy=camera 'none'; geolocation 'none'; microphone 'none'; payment 'none'; usb 'none'; vr 'none';" # Set Feature-Policy header values
+            - "traefik.http.middlewares.security-headers.headers.customresponseheaders.X-Robots-Tag=none,noarchive,nosnippet,notranslate,noimageindex" # Set custom response headers
+            - "traefik.http.middlewares.security-headers.headers.customresponseheaders.X-Powered-By=" # Remove X-Powered-By header
+            - "traefik.http.middlewares.security-headers.headers.customresponseheaders.X-Download-Options=noopen" # Add X-Download-Options header
+            - "traefik.http.middlewares.security-headers.headers.customresponseheaders.X-DNS-Prefetch-Control=off" # Add X-DNS-Prefetch-Control header
+            - "traefik.http.middlewares.security-headers.headers.customresponseheaders.Origin-Agent-Cluster=?1" # Add Origin-Agent-Cluster header
+            - "traefik.http.middlewares.security-headers.headers.contentsecuritypolicy=Content-Security-Policy: default-src 'self';base-uri 'self';font-src 'self' https: data:;form-action 'self';frame-ancestors 'self';img-src 'self' data:;object-src 'none';script-src 'self';script-src-attr 'none';style-src 'self' https: 'unsafe-inline';upgrade-insecure-requests"
+            - "traefik.http.middlewares.security-headers.headers.hostsproxyheaders=X-Forwarded-Host" # Configure proxy headers for X-Forwarded-Host
+            - "traefik.http.middlewares.security-headers.headers.sslredirect=true" # Enable HTTPS redirection
+            - "traefik.http.middlewares.security-headers.headers.sslproxyheaders.X-Forwarded-Proto=https" # Configure proxy headers for X-Forwarded-Proto
+            - "traefik.http.middlewares.security-headers.headers.stsseconds=15552000" # Set Strict-Transport-Security max-age value
+            - "traefik.http.middlewares.security-headers.headers.stsincludesubdomains=true" # Include subdomains in Strict-Transport-Security header
+            - "traefik.http.middlewares.security-headers.headers.stspreload=true" # Enable HTTP Strict Transport Security preload list
+            - "traefik.http.middlewares.security-headers.headers.forcestsheader=true" # Force Strict-Transport-Security header on all responses
+
+        networks:
+            - nestify-network
+        ports:
+            - "443:443"
+            - "80:80"
+            - "8080:8080"
+        volumes:
+            - ./letsencrypt:/letsencrypt
+            - ./logs/:/logs/
+            - /var/run/docker.sock:/var/run/docker.sock:ro
+
+# Nestify service
+# This service runs the Nestify application
+    nestify:
+        container_name: nestify
+        env_file: env/.env.${ENV}
+        build:
+            context: .
+            dockerfile: ./docker/{ENV}.Dockerfile
+        image: nestify
+        depends_on:
+            - traefik
+            - redis
+            - rabbitmq
+            - database
+
+        restart: unless-stopped
+        command: npm run start
+        labels:
+            - "traefik.enable=true"
+            - "traefik.http.routers.nestify.rule=Host(`${API_URL}`)"
+            - "traefik.http.services.nestify.loadbalancer.server.port=3000"
+            - "traefik.http.routers.nestify.entrypoints=websecure"
+            - "traefik.http.routers.nestify.tls=true"
+            - "traefik.http.routers.nestify.tls.certresolver=certresolver"
+            - "traefik.http.routes.nestify.middlewares=traefik-headers,traefik-compress,traefik-ratelimit,traefik-retry"
+
+        stdin_open: true
+        tty: true
+        networks:
+            - nestify-network
+        volumes:
+            - /usr/src/app/node_modules
+
+        healthcheck:
+          test:  curl --fail http://localhost:3000 || exit 1
+          interval: 30s
+          timeout: 30s
+          retries: 10
+
+
+# RabbitMQ service
+# This service runs the RabbitMQ message broker
+    rabbitmq:
+        container_name: rabbitmq
+        image: rabbitmq:3.13.2-management-alpine
+        env_file: env/.env.${ENV}
+        restart: unless-stopped
+        depends_on:
+            - traefik
+        environment:
+            - RABBITMQ_DEFAULT_USER=${RABBITMQ_DEFAULT_USER}
+            - RABBITMQ_DEFAULT_PASS=${RABBITMQ_DEFAULT_PASS}
+        volumes:
+            - rabbitmq-data:/var/lib/rabbitmq/mnesia/
+        networks:
+            - nestify-network
+        healthcheck:
+          test: rabbitmq-diagnostics check_port_connectivity
+          interval: 30s
+          timeout: 30s
+          retries: 10
+
+volumes:
+    redis-data:
+    rabbitmq-data:
+
+networks:
+    nestify-network:
+        driver: bridge
+        name: nestify-network
